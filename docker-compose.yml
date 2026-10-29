@@ -1,0 +1,167 @@
+# Dummy Bank, on-premises: the bank's own systems plus the credit engine installed from the
+# vendor's release image (ccp-engine:0.8.0) and profile. Nothing from the vendor's source code.
+#
+#   bash scripts/setup.sh                  # once: secrets, certificates, Keycloak realm
+#   docker compose up -d --build
+#   python tools/verify.py                 # optional end-to-end check (see README)
+#
+# Every service talks HTTPS / TLS with certificates of the bank's private CA (secrets/tls).
+# Host ports (127.0.0.1 only): console 28080, Keycloak 18443, core database 55440.
+
+x-pg-tls: &pg-tls   # PostgreSQL wants its key owned by postgres with mode 0600
+  image: postgres:16-alpine
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres"]   # TCP: not the init-time server
+    interval: 2s
+    timeout: 3s
+    retries: 30
+
+x-engine: &engine
+  image: ccp-engine:${ENGINE_TAG:-0.8.0}
+  environment: &engine-environment
+    CCP_PROFILE: /config/profile.yaml
+    SSL_CERT_FILE: /mnt/secrets/ca.pem      # the bank CA for the sign-in keys (JWKS)
+  volumes:
+    - ./engine/profile.yaml:/config/profile.yaml:ro
+    - ./secrets/engine:/mnt/secrets:ro
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  networks: [bank]
+
+services:
+  # ------------------------------------------------------------------ the bank's systems
+  core-db:
+    <<: *pg-tls
+    entrypoint: ["/bin/sh", "-c", "install -o postgres -g postgres -m 600 /tls/core-db.key /var/lib/postgresql/server.key && install -o postgres -g postgres -m 644 /tls/core-db.pem /var/lib/postgresql/server.crt && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresql/server.crt -c ssl_key_file=/var/lib/postgresql/server.key"]
+    environment:
+      POSTGRES_DB: core
+      POSTGRES_PASSWORD_FILE: /run/secrets/core-db-admin-password
+    volumes:
+      - core-data:/var/lib/postgresql/data
+      - ./bank/core-db/init:/docker-entrypoint-initdb.d:ro
+      - ./secrets/core-db-admin-password:/run/secrets/core-db-admin-password:ro
+      - ./secrets/core-api-password:/run/secrets/core-api-password:ro
+      - ./secrets/dwh-password:/run/secrets/dwh-password:ro
+      - ./secrets/tls:/tls:ro
+    ports: ["127.0.0.1:${CORE_DB_PORT:-55440}:5432"]
+    networks: {bank: {aliases: [core-db.dummybank.internal]}}
+
+  sso:
+    image: quay.io/keycloak/keycloak:${KEYCLOAK_TAG:-26.0.7}
+    entrypoint: ["/bin/bash", "-c", "export KC_BOOTSTRAP_ADMIN_PASSWORD=$$(cat /run/secrets/keycloak-admin-password); exec /opt/keycloak/bin/kc.sh start --import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_DB: dev-file
+      KC_HOSTNAME: https://localhost:${SSO_PORT:-18443}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"   # services inside use sso.dummybank.internal
+      KC_HTTPS_PORT: "8443"
+      KC_HTTP_ENABLED: "false"
+      KC_HTTPS_CERTIFICATE_FILE: /tls/sso.pem
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /tls/sso.key
+    volumes:
+      - ./secrets/realm-dummybank.json:/opt/keycloak/data/import/realm-dummybank.json:ro
+      - ./secrets/keycloak-admin-password:/run/secrets/keycloak-admin-password:ro
+      - ./secrets/tls/sso.pem:/tls/sso.pem:ro
+      - ./secrets/tls/sso.key:/tls/sso.key:ro
+      - ./bank/keycloak/themes:/opt/keycloak/themes:ro
+    ports: ["127.0.0.1:${SSO_PORT:-18443}:8443"]
+    networks: {bank: {aliases: [sso.dummybank.internal]}}
+
+  customer-api:
+    build: bank/services
+    image: dummybank-services:local
+    command: ["uvicorn", "customer_api:app", "--host", "0.0.0.0", "--port", "8443",
+              "--ssl-certfile", "/tls/customer-data.pem", "--ssl-keyfile", "/tls/customer-data.key"]
+    environment:
+      DB_HOST: core-db.dummybank.internal
+      CA_FILE: /tls/ca.pem
+      OIDC_ISSUER: https://localhost:${SSO_PORT:-18443}/realms/dummybank
+      OIDC_JWKS_URL: https://sso.dummybank.internal:8443/realms/dummybank/protocol/openid-connect/certs
+    volumes:
+      - ./secrets/core-api-password:/run/secrets/core-api-password:ro
+      - ./secrets/tls/ca.pem:/tls/ca.pem:ro
+      - ./secrets/tls/customer-data.pem:/tls/customer-data.pem:ro
+      - ./secrets/tls/customer-data.key:/tls/customer-data.key:ro
+    depends_on: {core-db: {condition: service_healthy}}
+    restart: unless-stopped
+    networks: {bank: {aliases: [customer-data.dummybank.internal]}}
+
+  models:
+    image: dummybank-services:local
+    command: ["uvicorn", "model_server:app", "--host", "0.0.0.0", "--port", "8443",
+              "--ssl-certfile", "/tls/models.pem", "--ssl-keyfile", "/tls/models.key"]
+    volumes:
+      - ./bank/models:/models:ro
+      - ./secrets/model-api-token:/run/secrets/model-api-token:ro
+      - ./secrets/tls/models.pem:/tls/models.pem:ro
+      - ./secrets/tls/models.key:/tls/models.key:ro
+    depends_on: [customer-api]   # same image: built once by customer-api
+    restart: unless-stopped
+    networks: {bank: {aliases: [models.dummybank.internal]}}
+
+  # ------------------------------------------------------------------ the credit engine
+  engine-db:
+    <<: *pg-tls
+    entrypoint: ["/bin/sh", "-c", "install -o postgres -g postgres -m 600 /tls/engine-db.key /var/lib/postgresql/server.key && install -o postgres -g postgres -m 644 /tls/engine-db.pem /var/lib/postgresql/server.crt && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresql/server.crt -c ssl_key_file=/var/lib/postgresql/server.key"]
+    environment:
+      POSTGRES_DB: credit_engine
+      POSTGRES_PASSWORD_FILE: /run/secrets/engine-db-admin-password
+    volumes:
+      - engine-data:/var/lib/postgresql/data
+      - ./engine/dba/10_roles.sh:/docker-entrypoint-initdb.d/10_roles.sh:ro
+      - ./engine/vendor/grants.sql:/vendor/grants.sql:ro
+      - ./secrets/engine-db-admin-password:/run/secrets/engine-db-admin-password:ro
+      - ./secrets/db-password:/run/secrets/db-password:ro
+      - ./secrets/db-migrator-password:/run/secrets/db-migrator-password:ro
+      - ./secrets/tls:/tls:ro
+    networks: {bank: {aliases: [engine-db.dummybank.internal]}}
+
+  engine-migrate:
+    <<: *engine
+    environment:
+      <<: *engine-environment
+      CCP_WORKLOAD_ROLE: migrations
+    command: ["ccp-migrate"]
+    restart: "no"
+    depends_on: {engine-db: {condition: service_healthy}}
+
+  dba-grants:   # the DBA's second step: grants after the first migration (vendor grants.sql)
+    image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "-c", "sed -n '/Run AFTER the first migration/,$$p' /vendor/grants.sql | PGPASSWORD=$$(cat /run/secrets/engine-db-admin-password) psql -v ON_ERROR_STOP=1 -h engine-db.dummybank.internal -U postgres -d credit_engine"]
+    environment:
+      PGSSLMODE: verify-full
+      PGSSLROOTCERT: /tls/ca.pem
+    volumes:
+      - ./engine/vendor/grants.sql:/vendor/grants.sql:ro
+      - ./secrets/engine-db-admin-password:/run/secrets/engine-db-admin-password:ro
+      - ./secrets/tls/ca.pem:/tls/ca.pem:ro
+    restart: "no"
+    depends_on: {engine-migrate: {condition: service_completed_successfully}}
+    networks: [bank]
+
+  engine-api:
+    <<: *engine
+    environment:
+      <<: *engine-environment
+      CCP_WORKLOAD_ROLE: api
+    ports: ["127.0.0.1:${ENGINE_PORT:-28080}:8080"]
+    restart: unless-stopped
+    depends_on: {dba-grants: {condition: service_completed_successfully}}
+
+  engine-worker:
+    <<: *engine
+    environment:
+      <<: *engine-environment
+      CCP_WORKLOAD_ROLE: worker
+    command: ["ccp-worker"]
+    restart: unless-stopped
+    depends_on: {dba-grants: {condition: service_completed_successfully}}
+
+networks:
+  bank: {}
+
+volumes:
+  core-data:
+  engine-data:

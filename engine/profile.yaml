@@ -1,0 +1,85 @@
+# Dummy Bank: the credit engine's installation profile, written by the bank's IT from the
+# vendor's deploy/profiles/onprem.example.yaml (release 0.8.0). Only WHERE things are: sign-in,
+# databases, customer data sources, allowed model endpoints. Everything else (data dictionary,
+# models, products, strategies) is set up in the console, starting empty.
+#
+# Changes: prepare/review a versioned package, deploy it, then rerun workload checks.
+company_id: DUMMY_BANK
+environment: uat
+auth:
+  mode: oidc
+  oidc:
+    issuer: https://localhost:18443/realms/dummybank          # as browsers and tokens see it
+    audience: credit-decision-engine
+    jwks_url: https://sso.dummybank.internal:8443/realms/dummybank/protocol/openid-connect/certs
+    console_client_id: ccp-console
+    console_scope: "openid credit-engine"
+customer_token_key_secret_name: customer-token-key
+adapters:
+  secrets: {provider: file, options: {directory: /mnt/secrets}}
+  strategies: {provider: managed}
+  features:
+    provider: dictionary
+    options:
+      application_data: true          # the loan system may also send application JSON
+      sources:
+        - name: customer_api          # the bank's customer-data API (OAuth2, HTTPS)
+          required: true
+          provider: rest_api
+          options:
+            url_template: https://customer-data.dummybank.internal:8443/v1/customers/{customer_ref}/metrics
+            auth: {type: oauth2_client_credentials,
+                   token_url: "https://sso.dummybank.internal:8443/realms/dummybank/protocol/openid-connect/token",
+                   client_id: ccp-engine, client_secret_secret_name: customer-api-client-secret}
+            ca_bundle_path: /mnt/secrets/ca.pem
+            observed_at_field: as_of
+        - name: exposure_dwh          # the risk data warehouse (read-only login, TLS)
+          required: true
+          provider: sql_table
+          options:
+            connection: {host: core-db.dummybank.internal, database: core, user: ccp_reader,
+                         auth: password, password_secret_name: dwh-password,
+                         ssl_mode: verify-full, ca_file: /mnt/secrets/ca.pem}
+            table: risk.customer_exposure_daily
+            key_column: customer_id
+            order_by_column: as_of_date
+            fields: {existing_exposure: total_exposure}
+            observed_at_field: as_of_date
+  model_serving:
+    provider: router
+    options:
+      registry:
+        enabled: true
+        allowed_endpoints: ["https://models.dummybank.internal:8443/models/"]
+  persistence:
+    provider: postgres
+    options:
+      host: engine-db.dummybank.internal
+      database: credit_engine
+      user: ccp_app
+      auth: password
+      password_secret_name: db-password
+      migration_user: ccp_migrator
+      migration_password_secret_name: db-migrator-password
+      ssl_mode: verify-full
+      ca_file: /mnt/secrets/ca.pem
+      pool_max_size: 10
+      # Allow TLS database connections to open during local Docker cold starts.
+      connect_timeout_s: 15
+  # events omitted: decision events stay in the outbox table (no event bus at this bank yet)
+
+# White-label settings are part of this bank installation, including sign-in.
+console:
+  branding:
+    organization_name: DummyBank
+    product_name: Credit Workspace
+    accent_color: '#4f46e5'
+
+# Local reference deployment binding; hashes do not establish pipeline approval.
+installation:
+  revision: cfg-a4e84e4810f52e4ef28374ea03ce4a60ddfa63fbe337db55abb88e8cbfbb782b
+  owner: DummyBank IT
+  profile_digests:
+    api: 425eb7c8f8c34285a42532aa391d657f8c7078d3ab635ad91232a4bd928ca7ec
+    worker: 425eb7c8f8c34285a42532aa391d657f8c7078d3ab635ad91232a4bd928ca7ec
+    migrations: 425eb7c8f8c34285a42532aa391d657f8c7078d3ab635ad91232a4bd928ca7ec

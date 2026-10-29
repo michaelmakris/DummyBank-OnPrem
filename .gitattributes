@@ -1,0 +1,3 @@
+# Files run inside Linux containers: keep LF on every platform.
+* text=auto eol=lf
+*.pem binary

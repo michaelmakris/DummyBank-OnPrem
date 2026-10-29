@@ -1,0 +1,4 @@
+{"name": "PD_PL", "version": "1", "target": "default_90dpd_within_12m",
+ "intercept": 2.0,
+ "coefficients": {"bureau_score": -0.009, "debt_to_income": 2.0, "existing_exposure": 0.00002},
+ "reference": {"bureau_score": 680, "debt_to_income": 0.25, "existing_exposure": 10000}}

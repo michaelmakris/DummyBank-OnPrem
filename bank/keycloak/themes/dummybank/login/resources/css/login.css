@@ -1,0 +1,47 @@
+body {
+  color-scheme: light;
+  background: #f6f6f4;
+  color: #0b0b0b;
+}
+
+#kc-header-wrapper {
+  color: #13233a;
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.pf-v5-c-login__main {
+  overflow: hidden;
+  border: 1px solid #e2e1dc;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgb(19 35 58 / 10%);
+}
+
+#kc-page-title {
+  color: #0b0b0b;
+}
+
+.pf-v5-c-form-control:focus {
+  border-color: #2a78d6;
+  box-shadow: 0 0 0 1px #2a78d6;
+}
+
+#kc-login,
+.pf-v5-c-button.pf-m-primary {
+  border-color: #2a78d6;
+  border-radius: 6px;
+  background: #2a78d6;
+}
+
+#kc-login:hover,
+.pf-v5-c-button.pf-m-primary:hover {
+  border-color: #2269bf;
+  background: #2269bf;
+}
+
+a {
+  color: #2a78d6;
+}

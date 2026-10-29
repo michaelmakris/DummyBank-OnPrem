@@ -1,0 +1,120 @@
+{
+  "realm": "dummybank",
+  "enabled": true,
+  "loginTheme": "dummybank",
+  "sslRequired": "external",
+  "accessTokenLifespan": 300,
+  "roles": {
+    "realm": [
+      {"name": "console:admin", "description": "Credit engine: everything, incl. platform"},
+      {"name": "console:read", "description": "Credit engine: read-only console"},
+      {"name": "campaigns:edit"}, {"name": "campaigns:approve"},
+      {"name": "strategies:edit", "description": "Edit dictionary, models, strategies"},
+      {"name": "strategies:approve", "description": "Approve (second person)"},
+      {"name": "credit-decisions:write", "description": "Loan origination: ask for decisions"},
+      {"name": "customer-data:read", "description": "Read the customer-data API"}
+    ]
+  },
+  "clientScopes": [
+    {
+      "name": "credit-engine",
+      "protocol": "openid-connect",
+      "attributes": {"include.in.token.scope": "false"},
+      "protocolMappers": [
+        {"name": "subject", "protocol": "openid-connect",
+         "protocolMapper": "oidc-sub-mapper",
+         "config": {"access.token.claim": "true", "introspection.token.claim": "true"}},
+        {"name": "roles", "protocol": "openid-connect",
+         "protocolMapper": "oidc-usermodel-realm-role-mapper",
+         "config": {"claim.name": "roles", "multivalued": "true", "jsonType.label": "String",
+                    "access.token.claim": "true", "id.token.claim": "false",
+                    "userinfo.token.claim": "false"}},
+        {"name": "audience credit engine", "protocol": "openid-connect",
+         "protocolMapper": "oidc-audience-mapper",
+         "config": {"included.custom.audience": "credit-decision-engine",
+                    "access.token.claim": "true", "id.token.claim": "false"}}
+      ]
+    },
+    {
+      "name": "customer-data",
+      "protocol": "openid-connect",
+      "attributes": {"include.in.token.scope": "false"},
+      "protocolMappers": [
+        {"name": "roles", "protocol": "openid-connect",
+         "protocolMapper": "oidc-usermodel-realm-role-mapper",
+         "config": {"claim.name": "roles", "multivalued": "true", "jsonType.label": "String",
+                    "access.token.claim": "true", "id.token.claim": "false",
+                    "userinfo.token.claim": "false"}},
+        {"name": "audience customer data", "protocol": "openid-connect",
+         "protocolMapper": "oidc-audience-mapper",
+         "config": {"included.custom.audience": "customer-data-api",
+                    "access.token.claim": "true", "id.token.claim": "false"}}
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "ccp-console",
+      "name": "Credit engine console (browser)",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["http://127.0.0.1:${ENGINE_PORT}/console/*",
+                       "http://localhost:${ENGINE_PORT}/console/*"],
+      "webOrigins": ["http://127.0.0.1:${ENGINE_PORT}", "http://localhost:${ENGINE_PORT}"],
+      "attributes": {"pkce.code.challenge.method": "S256",
+                     "post.logout.redirect.uris": "http://127.0.0.1:${ENGINE_PORT}/console/*##http://localhost:${ENGINE_PORT}/console/*"},
+      "defaultClientScopes": ["openid", "profile", "credit-engine"]
+    },
+    {
+      "clientId": "ccp-test-users",
+      "name": "Test automation: log in as a console user (DUMMY BANK ONLY, never in a real bank)",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "defaultClientScopes": ["openid", "profile", "credit-engine"]
+    },
+    {
+      "clientId": "los-system",
+      "name": "Loan origination system (calls the credit engine)",
+      "publicClient": false,
+      "secret": "${LOS_CLIENT_SECRET}",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "defaultClientScopes": ["credit-engine"]
+    },
+    {
+      "clientId": "ccp-engine",
+      "name": "Credit engine (calls the customer-data API)",
+      "publicClient": false,
+      "secret": "${ENGINE_CLIENT_SECRET}",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "defaultClientScopes": ["customer-data"]
+    }
+  ],
+  "users": [
+    {"username": "service-account-los-system", "enabled": true,
+     "serviceAccountClientId": "los-system", "realmRoles": ["credit-decisions:write"]},
+    {"username": "service-account-ccp-engine", "enabled": true,
+     "serviceAccountClientId": "ccp-engine", "realmRoles": ["customer-data:read"]},
+    {"username": "it.admin", "enabled": true, "email": "it.admin@dummybank.test",
+     "emailVerified": true, "firstName": "IT", "lastName": "Admin",
+     "credentials": [{"type": "password", "value": "${PW_ADMIN}", "temporary": false}],
+     "realmRoles": ["console:admin"]},
+    {"username": "maria.risk", "enabled": true, "email": "maria.risk@dummybank.test",
+     "emailVerified": true, "firstName": "Maria", "lastName": "Risk (editor)",
+     "credentials": [{"type": "password", "value": "${PW_EDITOR}", "temporary": false}],
+     "realmRoles": ["console:read", "strategies:edit", "campaigns:edit"]},
+    {"username": "nikos.approver", "enabled": true, "email": "nikos.approver@dummybank.test",
+     "emailVerified": true, "firstName": "Nikos", "lastName": "Approver",
+     "credentials": [{"type": "password", "value": "${PW_APPROVER}", "temporary": false}],
+     "realmRoles": ["console:read", "strategies:approve", "campaigns:approve"]},
+    {"username": "eva.viewer", "enabled": true, "email": "eva.viewer@dummybank.test",
+     "emailVerified": true, "firstName": "Eva", "lastName": "Viewer",
+     "credentials": [{"type": "password", "value": "${PW_VIEWER}", "temporary": false}],
+     "realmRoles": ["console:read"]}
+  ]
+}
