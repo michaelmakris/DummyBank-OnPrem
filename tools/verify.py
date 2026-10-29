@@ -8,7 +8,7 @@ bank's 100 customers? Python standard library only.
 Steps, each as the person who would do it in the console (Keycloak logins from ./secrets):
   1  Setup guide shows what is missing                         (eva.viewer)
   2  Data sources: fetch one customer through both sources      (it.admin)
-  3  Data dictionary v1: map the bank's fields                  (maria.risk -> nikos.approver)
+  3  Data dictionary v1: map the bank's fields                  (it.admin -> petros.it)
   4  Model PD_PL@1 on the bank's model server, checked          (maria.risk -> nikos.approver)
   5  Product PL_STD with eligibility rules and data age limit   (maria.risk -> nikos.approver)
   6  The loan system asks for 101 decisions (100 + 1 unknown)   (los-system client)
@@ -38,8 +38,8 @@ ENGINE = "http://127.0.0.1:28080"
 TOKEN_URL = "https://localhost:18443/realms/dummybank/protocol/openid-connect/token"
 TLS = ssl.create_default_context(cafile=str(SECRETS / "tls" / "ca.pem"))
 MODEL_FILE = ROOT / "bank" / "models" / "pd_pl_v1.json"
-USERS = {"admin": "it.admin", "editor": "maria.risk", "approver": "nikos.approver",
-         "viewer": "eva.viewer"}
+USERS = {"admin": "it.admin", "admin2": "petros.it", "editor": "maria.risk",
+         "approver": "nikos.approver", "viewer": "eva.viewer"}
 RESULTS: list[tuple[str, bool, str]] = []
 
 
@@ -186,14 +186,19 @@ def configure() -> None:
 
     current = ok("GET", "/v1/admin/dictionary", "viewer")
     if current["current"] is None:
-        created = ok("POST", "/v1/admin/dictionary", "editor",
+        # Since 0.7.0 the dictionary is IT-owned: an IT administrator maps the bank's fields,
+        # a different IT administrator approves.
+        status, _ = call("POST", "/v1/admin/dictionary", "editor", {"variables": DICTIONARY})
+        check("3a Credit risk editors cannot change the data dictionary", status == 403,
+              str(status))
+        created = ok("POST", "/v1/admin/dictionary", "admin",
                      {"variables": DICTIONARY, "note": "Dummy bank fields, first version"})
         ver = created["dictionary"]["version"]
-        ok("POST", f"/v1/admin/dictionary/{ver}/submit", "editor")
-        status, out = call("POST", f"/v1/admin/dictionary/{ver}/approve", "editor")
-        check("3a Four-eyes: the editor cannot approve her own dictionary", status == 403,
-              str(status))
-        ok("POST", f"/v1/admin/dictionary/{ver}/approve", "approver")
+        ok("POST", f"/v1/admin/dictionary/{ver}/submit", "admin")
+        status, out = call("POST", f"/v1/admin/dictionary/{ver}/approve", "admin")
+        check("3b Four-eyes: an administrator cannot approve his own dictionary",
+              status >= 400, f"{status} {str(out)[:80]}")
+        ok("POST", f"/v1/admin/dictionary/{ver}/approve", "admin2")
     check("3 Data dictionary in effect", ok("GET", "/v1/admin/dictionary/variables", "viewer")
           ["version"] is not None)
 

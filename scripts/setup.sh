@@ -25,7 +25,7 @@ for name in core-db-admin-password core-api-password dwh-password engine-db-admi
   rand 32 > "$S/$name"
 done
 rand 48 > "$S/customer-token-key"
-for user in admin editor approver viewer; do rand 16 > "$S/password-$user"; done
+for user in admin admin2 editor approver viewer; do rand 16 > "$S/password-$user"; done
 
 # The credit engine's secret directory holds only what the engine needs (least privilege).
 for name in db-password db-migrator-password dwh-password customer-api-client-secret \
@@ -57,6 +57,7 @@ sed -e "s/\${ENGINE_PORT}/${ENGINE_PORT:-28080}/g" \
     -e "s/\${LOS_CLIENT_SECRET}/$(cat $S/los-client-secret)/" \
     -e "s/\${ENGINE_CLIENT_SECRET}/$(cat $S/customer-api-client-secret)/" \
     -e "s/\${PW_ADMIN}/$(cat $S/password-admin)/" \
+    -e "s/\${PW_ADMIN2}/$(cat $S/password-admin2)/" \
     -e "s/\${PW_EDITOR}/$(cat $S/password-editor)/" \
     -e "s/\${PW_APPROVER}/$(cat $S/password-approver)/" \
     -e "s/\${PW_VIEWER}/$(cat $S/password-viewer)/" \
@@ -65,7 +66,8 @@ sed -e "s/\${ENGINE_PORT}/${ENGINE_PORT:-28080}/g" \
 cat > "$S/LOGINS.txt" <<EOF
 Dummy bank console logins (http://127.0.0.1:${ENGINE_PORT:-28080}/console/)
   it.admin        $(cat $S/password-admin)      IT administrator (everything)
-  maria.risk      $(cat $S/password-editor)      credit risk: edits dictionary, models, strategies
+  petros.it       $(cat $S/password-admin2)      second IT administrator (four-eyes on IT-owned setup)
+  maria.risk      $(cat $S/password-editor)      credit risk: edits models, products, strategies
   nikos.approver  $(cat $S/password-approver)      approver: the second person (four-eyes)
   eva.viewer      $(cat $S/password-viewer)      read-only
 Keycloak admin console: https://localhost:18443/admin/  admin / $(cat $S/keycloak-admin-password)
