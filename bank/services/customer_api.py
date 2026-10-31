@@ -82,11 +82,15 @@ async def metrics(customer_id: str, _: dict[str, Any] = Depends(caller)) -> dict
                    "employment": {"type": c["employment_type"]},
                    "income": {"net_monthly": float(income)}},
         "scores": {"bureau": b["bureau_score"] if b else None},
-        "affordability": {"dti": round(float(debt / income), 4),
-                          # what the customer can still repay per month, times 24 months
-                          "max_affordable_amount": round(float(max(income * 35 / 100 - debt, 0)
-                                                               * 24), 2)},
+        "affordability": {
+            # no income: debt-to-income is undefined (null), not a crash and not 0
+            "dti": round(float(debt / income), 4) if income > 0 else None,
+            # what the customer can still repay per month, times 24 months
+            "max_affordable_amount": round(float(max(income * 35 / 100 - debt, 0) * 24), 2)},
         "accounts": [{"id": a["account_id"], "product": a["product"], "status": a["status"],
                       "balance": float(a["balance"])} for a in accounts],
-        "public_records": {"bankruptcy": "Y" if bankrupt else "N"},
+        # no public-record row: unknown (null), never "N" - the engine's bankruptcy rule then
+        # applies its missing-data action instead of passing the customer silently
+        "public_records": {"bankruptcy": None if bankrupt is None else
+                           ("Y" if bankrupt else "N")},
     }

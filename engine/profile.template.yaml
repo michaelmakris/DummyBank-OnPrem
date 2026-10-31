@@ -1,3 +1,6 @@
+# TEMPLATE: bash scripts/setup.sh writes generated/profile.yaml from it with the effective
+# SSO_PORT (the engine mounts the generated file).
+#
 # Dummy Bank: the credit engine's installation profile, written by the bank's IT from the
 # vendor's deploy/profiles/onprem.example.yaml (release 0.8.0). Only WHERE things are: sign-in,
 # databases, customer data sources, allowed model endpoints. Everything else (data dictionary,
@@ -9,7 +12,7 @@ environment: uat
 auth:
   mode: oidc
   oidc:
-    issuer: https://localhost:18443/realms/dummybank          # as browsers and tokens see it
+    issuer: https://localhost:${SSO_PORT}/realms/dummybank    # as browsers and tokens see it (setup.sh fills the port)
     audience: credit-decision-engine
     jwks_url: https://sso.dummybank.internal:8443/realms/dummybank/protocol/openid-connect/certs
     console_client_id: ccp-console

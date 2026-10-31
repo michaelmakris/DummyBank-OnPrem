@@ -72,7 +72,8 @@ those elements, for example counting accounts or testing whether any status is
 
 ## 3. How the product is configured to call it
 
-The installed connection is in [engine/profile.yaml](engine/profile.yaml):
+The installed connection is in [engine/profile.template.yaml](engine/profile.template.yaml)
+(`bash scripts/setup.sh` writes `generated/profile.yaml` from it with the effective ports):
 
 ```yaml
 name: customer_api
@@ -124,6 +125,25 @@ Read-only verification from the running engine confirmed:
 
 **Test a customer lookup / Fetch metrics** is a later operation that uses decision setup.
 Begin with **API connection test** while building that setup.
+
+## Setup, secrets and ports
+
+* `bash scripts/setup.sh` creates the secrets and certificates once, and on every run writes the
+  configuration for the effective ports (`ENGINE_PORT`, `SSO_PORT` from the environment, else
+  `.env`, else 28080 / 18443) to `.env`, `generated/profile.yaml` and the Keycloak realm file.
+  After changing a port, run it again and `docker compose up -d`; on an existing installation it
+  also says which Keycloak client setting to update (Keycloak keeps its realm).
+* `--force` creates new secrets and is refused while the installation's data exists: new
+  passwords would lock out the databases and Keycloak, and a new customer-token key would cut
+  customers off from their earlier decisions. To start over, delete the data first
+  (`docker compose down -v`).
+* Least privilege: the engine's API and worker mount `secrets/engine`; only `engine-migrate`
+  mounts `secrets/engine-migration` (with the migration password). Each database mounts only its
+  own certificate and key; the CA signing key (`secrets/ca`) is mounted nowhere.
+* Databases and Keycloak restart with Docker; Keycloak keeps users, their IDs and signing keys
+  on the `sso-data` volume.
+* `python tools/verify.py` checks the installation end to end (9 checks); the bank's own
+  evidence and IT review (setup guide step *checks*) stay with people.
 
 ## 5. What comes next
 

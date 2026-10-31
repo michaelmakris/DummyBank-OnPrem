@@ -46,15 +46,44 @@ async def invocations(name: str, body: dict[str, Any],
     frame = body.get("dataframe_split") or {}
     columns, rows = frame.get("columns", []), frame.get("data", [])
     coef: dict[str, float] = model["coefficients"]
-    if sorted(columns) != sorted(coef):
+    if not isinstance(columns, list) or sorted(map(str, columns)) != sorted(coef):
         raise HTTPException(422, f"expected columns {sorted(coef)}, got {columns}")
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(422, "dataframe_split.data must be a non-empty list of rows")
     out = []
-    for row in rows:
-        x = dict(zip(columns, row, strict=True))
-        z = model["intercept"] + sum(coef[n] * float(x[n]) for n in coef)
-        pd = 1 / (1 + math.exp(-z))
-        out.append({"calibrated_pd": round(pd, 6), "raw_score": round(z, 6),
+    for i, row in enumerate(rows):
+        x = _row(i, columns, row)
+        z = model["intercept"] + sum(coef[n] * x[n] for n in coef)
+        if not math.isfinite(z):
+            raise HTTPException(422, f"row {i}: the inputs are too large to score")
+        out.append({"calibrated_pd": round(_sigmoid(z), 6), "raw_score": round(z, 6),
                     "model_digest": digest,
-                    "contributions": {n: round(coef[n] * (float(x[n]) - model["reference"][n]), 6)
+                    "contributions": {n: round(coef[n] * (x[n] - model["reference"][n]), 6)
                                       for n in coef}})
     return {"predictions": out}
+
+
+def _row(i: int, columns: list[Any], row: Any) -> dict[str, float]:
+    """One input row as finite numbers; anything else is the caller's error (422), not 500."""
+    if not isinstance(row, list) or len(row) != len(columns):
+        raise HTTPException(422, f"row {i}: expected {len(columns)} values")
+    values: dict[str, float] = {}
+    for column, value in zip(columns, row, strict=True):
+        if value is None or isinstance(value, bool):
+            raise HTTPException(422, f"row {i}: {column} must be a number, got {value!r}")
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise HTTPException(422, f"row {i}: {column} is not a number: {value!r}") from None
+        if not math.isfinite(number):
+            raise HTTPException(422, f"row {i}: {column} must be finite")
+        values[str(column)] = number
+    return values
+
+
+def _sigmoid(z: float) -> float:
+    """1 / (1 + e^-z) without overflow for large |z|."""
+    if z >= 0:
+        return 1 / (1 + math.exp(-z))
+    e = math.exp(z)
+    return e / (1 + e)

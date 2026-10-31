@@ -109,7 +109,7 @@
      "credentials": [{"type": "password", "value": "${PW_ADMIN2}", "temporary": false}],
      "realmRoles": ["console:admin"]},
     {"username": "maria.risk", "enabled": true, "email": "maria.risk@dummybank.test",
-     "emailVerified": true, "firstName": "Maria", "lastName": "Risk (editor)",
+     "emailVerified": true, "firstName": "Maria", "lastName": "Risk",
      "credentials": [{"type": "password", "value": "${PW_EDITOR}", "temporary": false}],
      "realmRoles": ["console:read", "strategies:edit", "campaigns:edit"]},
     {"username": "nikos.approver", "enabled": true, "email": "nikos.approver@dummybank.test",

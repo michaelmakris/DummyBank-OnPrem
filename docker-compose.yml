@@ -1,15 +1,21 @@
 # Dummy Bank, on-premises: the bank's own systems plus the credit engine installed from the
 # vendor's release image (ccp-engine:0.8.0) and profile. Nothing from the vendor's source code.
 #
-#   bash scripts/setup.sh                  # once: secrets, certificates, Keycloak realm
+#   bash scripts/setup.sh                  # secrets, certificates; config from the ports
 #   docker compose up -d --build
 #   python tools/verify.py                 # optional end-to-end check (see README)
 #
 # Every service talks HTTPS / TLS with certificates of the bank's private CA (secrets/tls).
 # Host ports (127.0.0.1 only): console 28080, Keycloak 18443, core database 55440.
+#
+# Least privilege: each container mounts only the secrets and keys it uses. The CA signing key
+# (secrets/ca) is mounted nowhere; the engine's API and worker do not get the migration
+# password (secrets/engine-migration, engine-migrate only). Databases and sign-in restart with
+# Docker like the services that depend on them; Keycloak keeps its data on a volume.
 
 x-pg-tls: &pg-tls   # PostgreSQL wants its key owned by postgres with mode 0600
   image: postgres:16-alpine
+  restart: unless-stopped
   healthcheck:
     test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres"]   # TCP: not the init-time server
     interval: 2s
@@ -22,7 +28,7 @@ x-engine: &engine
     CCP_PROFILE: /config/profile.yaml
     SSL_CERT_FILE: /mnt/secrets/ca.pem      # the bank CA for the sign-in keys (JWKS)
   volumes:
-    - ./engine/profile.yaml:/config/profile.yaml:ro
+    - ./generated/profile.yaml:/config/profile.yaml:ro
     - ./secrets/engine:/mnt/secrets:ro
   read_only: true
   tmpfs: [/tmp]
@@ -44,7 +50,8 @@ services:
       - ./secrets/core-db-admin-password:/run/secrets/core-db-admin-password:ro
       - ./secrets/core-api-password:/run/secrets/core-api-password:ro
       - ./secrets/dwh-password:/run/secrets/dwh-password:ro
-      - ./secrets/tls:/tls:ro
+      - ./secrets/tls/core-db.pem:/tls/core-db.pem:ro      # its own certificate and key only
+      - ./secrets/tls/core-db.key:/tls/core-db.key:ro
     ports: ["127.0.0.1:${CORE_DB_PORT:-55440}:5432"]
     networks: {bank: {aliases: [core-db.dummybank.internal]}}
 
@@ -53,7 +60,7 @@ services:
     entrypoint: ["/bin/bash", "-c", "export KC_BOOTSTRAP_ADMIN_PASSWORD=$$(cat /run/secrets/keycloak-admin-password); exec /opt/keycloak/bin/kc.sh start --import-realm"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_DB: dev-file
+      KC_DB: dev-file      # kept on the sso-data volume: users, subjects and signing keys survive
       KC_HOSTNAME: https://localhost:${SSO_PORT:-18443}
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"   # services inside use sso.dummybank.internal
       KC_HTTPS_PORT: "8443"
@@ -61,12 +68,14 @@ services:
       KC_HTTPS_CERTIFICATE_FILE: /tls/sso.pem
       KC_HTTPS_CERTIFICATE_KEY_FILE: /tls/sso.key
     volumes:
+      - sso-data:/opt/keycloak/data
       - ./secrets/realm-dummybank.json:/opt/keycloak/data/import/realm-dummybank.json:ro
       - ./secrets/keycloak-admin-password:/run/secrets/keycloak-admin-password:ro
       - ./secrets/tls/sso.pem:/tls/sso.pem:ro
       - ./secrets/tls/sso.key:/tls/sso.key:ro
       - ./bank/keycloak/themes:/opt/keycloak/themes:ro
     ports: ["127.0.0.1:${SSO_PORT:-18443}:8443"]
+    restart: unless-stopped
     networks: {bank: {aliases: [sso.dummybank.internal]}}
 
   customer-api:
@@ -115,7 +124,8 @@ services:
       - ./secrets/engine-db-admin-password:/run/secrets/engine-db-admin-password:ro
       - ./secrets/db-password:/run/secrets/db-password:ro
       - ./secrets/db-migrator-password:/run/secrets/db-migrator-password:ro
-      - ./secrets/tls:/tls:ro
+      - ./secrets/tls/engine-db.pem:/tls/engine-db.pem:ro  # its own certificate and key only
+      - ./secrets/tls/engine-db.key:/tls/engine-db.key:ro
     networks: {bank: {aliases: [engine-db.dummybank.internal]}}
 
   engine-migrate:
@@ -123,6 +133,9 @@ services:
     environment:
       <<: *engine-environment
       CCP_WORKLOAD_ROLE: migrations
+    volumes:   # the only engine container with the migration password
+      - ./generated/profile.yaml:/config/profile.yaml:ro
+      - ./secrets/engine-migration:/mnt/secrets:ro
     command: ["ccp-migrate"]
     restart: "no"
     depends_on: {engine-db: {condition: service_healthy}}
@@ -165,3 +178,4 @@ networks:
 volumes:
   core-data:
   engine-data:
+  sso-data:

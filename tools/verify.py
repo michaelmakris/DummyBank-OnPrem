@@ -22,20 +22,35 @@ import hashlib
 import json
 import math
 import ssl
+import os
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SECRETS = ROOT / "secrets"
-ENGINE = "http://127.0.0.1:28080"
-TOKEN_URL = "https://localhost:18443/realms/dummybank/protocol/openid-connect/token"
+
+
+def _port(name: str, default: str) -> str:
+    """The effective port: environment, else .env (written by setup.sh), else the default."""
+    if os.environ.get(name):
+        return os.environ[name]
+    env = ROOT / ".env"
+    for line in env.read_text(encoding="utf-8").splitlines() if env.is_file() else ():
+        if line.startswith(f"{name}="):
+            return line.split("=", 1)[1].strip()
+    return default
+
+
+ENGINE = f"http://127.0.0.1:{_port('ENGINE_PORT', '28080')}"
+TOKEN_URL = (f"https://localhost:{_port('SSO_PORT', '18443')}"
+             "/realms/dummybank/protocol/openid-connect/token")
 TLS = ssl.create_default_context(cafile=str(SECRETS / "tls" / "ca.pem"))
 MODEL_FILE = ROOT / "bank" / "models" / "pd_pl_v1.json"
 USERS = {"admin": "it.admin", "admin2": "petros.it", "editor": "maria.risk",
@@ -174,33 +189,55 @@ def model_body() -> dict[str, Any]:
         "description": "Dummy bank personal-loan PD model, logistic, 12-month default"}
 
 
+BUREAU = {"required": True, "max_age_seconds": 180 * 86400}
+
+
+def _bureau_ok(feature: dict[str, Any]) -> bool:
+    return all(feature.get(k) == v for k, v in BUREAU.items())
+
+
 def configure() -> None:
     guide = ok("GET", "/v1/admin/setup", "viewer")
     todo = [s["id"] for s in guide["steps"] if s["status"] == "todo"]
     check("1 Setup guide lists what is missing", not guide["ready"] or not todo,
           f"to do: {', '.join(todo) or 'nothing'}")
 
-    test = ok("POST", "/v1/admin/features/test", "admin", {"customer_ref": "DB0021"})
-    check("2 Data sources: one customer through the customer API and the warehouse",
-          bool(test.get("ok")), json.dumps(test)[:160])
-
     current = ok("GET", "/v1/admin/dictionary", "viewer")
-    if current["current"] is None:
+    waiting = [v["dictionary"] for v in current["versions"]
+               if v["dictionary"]["status"] == "APPROVED" and current["current"] is None]
+    if waiting:  # approved earlier, not in effect yet: wait for it instead of adding another
+        starts = min(datetime.fromisoformat(v["valid_from"]) for v in waiting)
+        if starts - datetime.now(UTC) > timedelta(minutes=10):
+            check("3 Data dictionary in effect", False,
+                  f"an approved version starts only at {starts.isoformat()}")
+            return
+        time.sleep(max(0.0, (starts - datetime.now(UTC)).total_seconds()) + 5)
+    elif current["current"] is None:
         # Since 0.7.0 the dictionary is IT-owned: an IT administrator maps the bank's fields,
         # a different IT administrator approves.
         status, _ = call("POST", "/v1/admin/dictionary", "editor", {"variables": DICTIONARY})
         check("3a Credit risk editors cannot change the data dictionary", status == 403,
               str(status))
+        # in effect a few seconds after approval (the engine's default is the next full hour)
+        starts = datetime.now(UTC) + timedelta(seconds=20)
         created = ok("POST", "/v1/admin/dictionary", "admin",
-                     {"variables": DICTIONARY, "note": "Dummy bank fields, first version"})
+                     {"variables": DICTIONARY, "note": "Dummy bank fields, first version",
+                      "valid_from": starts.isoformat()})
         ver = created["dictionary"]["version"]
         ok("POST", f"/v1/admin/dictionary/{ver}/submit", "admin")
         status, out = call("POST", f"/v1/admin/dictionary/{ver}/approve", "admin")
         check("3b Four-eyes: an administrator cannot approve his own dictionary",
               status >= 400, f"{status} {str(out)[:80]}")
         ok("POST", f"/v1/admin/dictionary/{ver}/approve", "admin2")
+        time.sleep(max(0.0, (starts - datetime.now(UTC)).total_seconds()) + 5)
     check("3 Data dictionary in effect", ok("GET", "/v1/admin/dictionary/variables", "viewer")
           ["version"] is not None)
+
+    # The engine maps the sources' fields through the approved dictionary, so the data
+    # sources are tested once a dictionary is in effect (on a fresh installation too).
+    test = ok("POST", "/v1/admin/features/test", "admin", {"customer_ref": "DB0021"})
+    check("3c Data sources: one customer through the customer API and the warehouse",
+          bool(test.get("ok")), json.dumps(test)[:160])
 
     models = ok("GET", "/v1/admin/models", "viewer")["models"]
     if not any(m["ref"] == "PD_PL@1" and m["registered"]["status"] == "APPROVED"
@@ -208,22 +245,34 @@ def configure() -> None:
         if not any(m["ref"] == "PD_PL@1" for m in models):
             ok("POST", "/v1/admin/models", "editor", model_body())
         report = ok("POST", "/v1/admin/models/PD_PL/1/check", "editor")
-        check("4a Model check against the bank's model server", bool(report.get("ok")),
+        check("4a Model check against the bank's model server", bool(report.get("passed")),
               json.dumps(report)[:200])
         ok("POST", "/v1/admin/models/PD_PL/1/submit", "editor")
         ok("POST", "/v1/admin/models/PD_PL/1/approve", "approver")
     check("4 Model PD_PL@1 approved", True)
 
     products = ok("GET", "/v1/admin/products", "viewer")["products"]
-    if not any(p["product_id"] == "PL_STD" and p["champion"] for p in products):
+    live = next((p["champion"] for p in products
+                 if p["product_id"] == "PL_STD" and p["champion"]), None)
+    draft = None
+    if live is None:
         draft = ok("POST", "/v1/admin/strategies/new-product", "editor", {
             "bundle_id": "PL-STD", "model_ref": "PD_PL@1", "note": "First product",
             "product": {"product_id": "PL_STD", "currency": "EUR", "min_amount": "500",
                         "max_amount": "15000", "amount_step": "50",
                         "allowed_tenors_months": [12, 24, 36, 48]}})["bundle"]
+    else:
+        path = f"/v1/admin/strategies/{live['bundle_id']}/{live['version']}"
+        bundle = ok("GET", path, "viewer")["record"]["bundle"]
+        if not all(_bureau_ok(f) for f in bundle["features"] if f["name"] == "bureau_score"):
+            draft = ok("POST", f"{path}/new-version", "editor",
+                       {"note": "Bureau score required and at most 180 days old"})["bundle"]
+    if draft is not None:
         base = f"/v1/admin/strategies/{draft['bundle_id']}/{draft['version']}"
-        features = [{**f, **({"max_age_seconds": 180 * 86400}
-                             if f["name"] == "bureau_score" else {})}
+        # The bureau score must be present and at most 180 days old (DB0016-DB0020 are planted
+        # without a score or with a stale one). Required: the engine checks the age of
+        # required data; an older score must refer the application, never be scored.
+        features = [{**f, **BUREAU} if f["name"] == "bureau_score" else f
                     for f in draft["features"]]
         ok("PUT", base, "editor", {"policy_rules": RULES, "features": features,
                                    "valid_from": datetime.now(UTC).isoformat()})
@@ -241,11 +290,17 @@ EXPECTED = {**{f"DB{n:04d}": ("DECLINE", "KO_MINIMUM_AGE") for n in range(1, 4)}
             **{f"DB{n:04d}": ("REFER", "REF_ARREARS") for n in range(11, 16)},
             **{f"DB{n:04d}": ("REFER", None) for n in range(16, 21)},  # no / stale score
             "DB9999": ("REFER", None)}                                # unknown customer
+# Ordinary customers (complete data) must be decided by the model: APPROVE or DECLINE, never a
+# referral or error caused by a failing dependency. These must be approved with an offer.
+KNOWN_GOOD = ("DB0021", "DB0022", "DB0025")
+DEPENDENCY_FAILURES = {"MODEL_UNAVAILABLE", "MODEL_OUTPUT_INVALID", "MODEL_INPUT_INVALID",
+                       "MANDATORY_FEATURE_UNAVAILABLE", "MANDATORY_FEATURE_STALE",
+                       "NO_EFFECTIVE_STRATEGY", "TRANSFORMATION_FAILED"}
 
 
 def decide_all() -> None:
     counts: dict[str, int] = {}
-    wrong, errors = [], []
+    wrong, errors, unscored = [], [], []
     for cid in [f"DB{n:04d}" for n in range(1, 101)] + ["DB9999"]:
         status, out = call("POST", "/v1/credit-decisions", "los", {
             "application_id": f"app-{uuid.uuid4().hex[:10]}", "customer_ref": cid,
@@ -260,18 +315,32 @@ def decide_all() -> None:
         hits = [h["rule_id"] for h in out.get("policy_rules_hit") or []]
         if out["status"] == "ERROR":
             errors.append(f"{cid}: ERROR {out.get('reason_codes')}")
+        reasons = set(out.get("reason_codes") or [])
         if cid in EXPECTED:
             want, rule = EXPECTED[cid]
             if out["status"] != want or (rule and rule not in hits):
                 wrong.append(f"{cid}: {out['status']} {out.get('reason_codes')} {hits}")
+        elif (out["status"] not in ("APPROVE", "DECLINE") or reasons & DEPENDENCY_FAILURES
+              or (cid in KNOWN_GOOD and (out["status"] != "APPROVE" or not out.get("limit")))):
+            unscored.append(f"{cid}: {out['status']} {out.get('reason_codes')}")
     check("6 101 decisions answered, none ERROR", not errors, "; ".join(errors[:5]))
     check("7 Planted cases (age, write-off, bankruptcy, arrears, missing/stale data, unknown "
           "customer) decided as expected, none approved", not wrong, "; ".join(wrong[:6]))
+    check(f"7b Ordinary customers scored by the model (APPROVE / DECLINE, no dependency "
+          f"failure); {', '.join(KNOWN_GOOD)} approved with an offer", not unscored,
+          f"{len(unscored)} not scored: " + "; ".join(unscored[:6]) if unscored else
+          f"{counts.get('APPROVE', 0)} approved")
     print("   outcomes:", counts)
     guide = ok("GET", "/v1/admin/setup", "viewer")
-    check("8 Setup guide: ready and the calling system connected",
-          guide["ready"] and next(s for s in guide["steps"] if s["id"] == "go_live")["status"]
-          == "done")
+    # `checks` is the bank's own evidence (roles, workload, UAT, recovery) and an independent
+    # IT review: people provide it in the console, a script cannot. Everything else must be done.
+    manual = {"checks", "extras"}
+    open_steps = [s["id"] for s in guide["steps"]
+                  if s["id"] not in manual and s["status"] != "done"]
+    pending = [s["id"] for s in guide["steps"] if s["id"] in manual and s["status"] == "todo"]
+    check("8 Setup guide: every configurable step done, the calling system connected",
+          not open_steps, f"open: {', '.join(open_steps)}" if open_steps else
+          f"left for people: {', '.join(pending) or 'nothing'}")
 
 
 def main() -> int:

@@ -11,8 +11,11 @@ CREATE TABLE core.customers (
     last_name           text NOT NULL,
     date_of_birth       date NOT NULL,
     employment_type     text NOT NULL,
-    net_monthly_income  numeric(12, 2) NOT NULL,
-    monthly_debt_payments numeric(12, 2) NOT NULL
+    -- 0 = no income (the customer API then reports debt-to-income as unknown); never negative
+    net_monthly_income  numeric(12, 2) NOT NULL CONSTRAINT income_not_negative
+                            CHECK (net_monthly_income >= 0),
+    monthly_debt_payments numeric(12, 2) NOT NULL CONSTRAINT debt_not_negative
+                            CHECK (monthly_debt_payments >= 0)
 );
 
 CREATE TABLE core.bureau_reports (
