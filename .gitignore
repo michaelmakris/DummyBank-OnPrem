@@ -3,3 +3,4 @@ secrets/
 __pycache__/
 reports/
 generated/
+backups/
